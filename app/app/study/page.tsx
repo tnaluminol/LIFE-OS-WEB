@@ -767,7 +767,7 @@ function CompletionDialog({
             </>
           ) : (
             <>
-              <p className="text-sm font-medium pt-2">You've reached the maximum challenge length!</p>
+              <p className="text-sm font-medium pt-2">You&apos;ve reached the maximum challenge length!</p>
               <Button variant="outline" onClick={onClose} className="w-full">Close</Button>
             </>
           )}

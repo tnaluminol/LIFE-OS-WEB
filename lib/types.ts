@@ -119,6 +119,20 @@ export interface Goal {
   updated_at: string;
 }
 
+export type FriendshipStatus = 'pending' | 'accepted' | 'declined' | 'blocked';
+export type JournalVisibility = 'private' | 'friends' | 'public';
+export type HabitCategory = 'health' | 'study' | 'mindfulness' | 'fitness' | 'productivity' | 'general';
+
+export interface Friendship {
+  id: string;
+  user_id: string;
+  friend_id: string;
+  status: FriendshipStatus;
+  friend_profile?: Profile | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Habit {
   id: string;
   user_id: string;
@@ -126,6 +140,11 @@ export interface Habit {
   icon: string;
   frequency: string;
   streak: number;
+  category?: HabitCategory;
+  target_days_per_week?: number;
+  color?: string;
+  is_preset?: boolean;
+  archived?: boolean;
   created_at: string;
 }
 
@@ -137,12 +156,51 @@ export interface HabitLog {
   created_at: string;
 }
 
+export interface PresetHabit {
+  name: string;
+  icon: string;
+  category: HabitCategory;
+  description: string;
+  suggestedTarget: number;
+  color: string;
+  tags: string[];
+}
+
 export interface MoodEntry {
   id: string;
   user_id: string;
   mood: number;
   note: string | null;
   tags: string[];
+  entry_date?: string;
+  created_at: string;
+}
+
+export interface JournalReaction {
+  id: string;
+  journal_id: string;
+  user_id: string;
+  reaction_type: string;
+  user_profile?: Profile | null;
+  created_at: string;
+}
+
+export interface JournalComment {
+  id: string;
+  journal_id: string;
+  author_id: string;
+  content: string;
+  author?: Profile | null;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface JournalShare {
+  id: string;
+  journal_id: string;
+  user_id: string;
+  note: string | null;
+  user_profile?: Profile | null;
   created_at: string;
 }
 
@@ -153,9 +211,39 @@ export interface JournalEntry {
   content: string;
   mood: number | null;
   is_private: boolean;
+  visibility?: JournalVisibility;
+  tags?: string[];
+  images?: string[];
+  reactions_count?: number;
+  comments_count?: number;
+  shares_count?: number;
   ai_analysis: Record<string, unknown> | null;
+  author?: Profile | null;
+  reactions?: JournalReaction[];
+  comments?: JournalComment[];
+  user_has_reacted?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface MoodAnalysisResult {
+  averageMood: number;
+  trend: 'positive' | 'negative' | 'neutral';
+  dominantMood: string;
+  dominantMoodEmoji: string;
+  positiveCount: number;
+  negativeCount: number;
+  neutralCount: number;
+  totalLoggedDays: number;
+  title: string;
+  insight: string;
+  detailedAdvice: string;
+  recommendedHabits: {
+    habit?: Habit;
+    presetSuggestion?: PresetHabit;
+    reason: string;
+    actionType: 'check_in' | 'add_habit';
+  }[];
 }
 
 export interface Project {
