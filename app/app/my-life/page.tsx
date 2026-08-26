@@ -48,7 +48,7 @@ export default function MyLifePage() {
         fetchUserHabits(user.id),
         fetchHabitLogsForDates(user.id, startStr, endStr),
         fetchMoodEntries(user.id, 14),
-        fetchJournalFeed(user.id, 'friends'),
+        fetchJournalFeed(user.id, 'all'),
         fetchConnectedFriends(user.id),
       ]);
 

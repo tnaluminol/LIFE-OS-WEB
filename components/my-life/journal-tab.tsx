@@ -1,9 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import {
   fetchJournalFeed,
+  fetchUserJournals,
   createJournalEntry,
   deleteJournalEntry,
   toggleJournalReaction,
@@ -49,8 +50,7 @@ import {
   Copy,
   Check,
   Hash,
-  X,
-  ExternalLink,
+  RefreshCw,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -68,12 +68,14 @@ interface JournalTabProps {
 export function JournalTab({
   currentUserId,
   currentUserProfile,
-  journals,
+  journals: initialJournals,
   onJournalsUpdated,
   onOpenFriendsModal,
 }: JournalTabProps) {
   // Feed filter state
   const [feedFilter, setFeedFilter] = useState<'friends' | 'mine' | 'public'>('friends');
+  const [localJournals, setLocalJournals] = useState<JournalEntry[]>(initialJournals || []);
+  const [loadingFeed, setLoadingFeed] = useState(false);
 
   // Composer state
   const [title, setTitle] = useState('');
@@ -96,10 +98,53 @@ export function JournalTab({
   const [submittingShare, setSubmittingShare] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
 
+  // Sync with prop when parent reloads
+  useEffect(() => {
+    if (initialJournals && initialJournals.length > 0) {
+      setLocalJournals((prev) => {
+        // Merge without losing optimistic newly added posts
+        const prevIds = new Set(initialJournals.map((j) => j.id));
+        const optimisticNew = prev.filter((p) => !prevIds.has(p.id));
+        return [...optimisticNew, ...initialJournals];
+      });
+    }
+  }, [initialJournals]);
+
+  // Fetch feed dynamically when filter changes or on demand
+  const loadFilterData = useCallback(
+    async (filter: 'friends' | 'mine' | 'public') => {
+      if (!currentUserId) return;
+      setLoadingFeed(true);
+      try {
+        let data: JournalEntry[] = [];
+        if (filter === 'mine') {
+          data = await fetchUserJournals(currentUserId);
+        } else {
+          data = await fetchJournalFeed(currentUserId, filter);
+        }
+        setLocalJournals(data);
+      } catch (err) {
+        console.error('[JournalTab:loadFilterData] Error:', err);
+      } finally {
+        setLoadingFeed(false);
+      }
+    },
+    [currentUserId]
+  );
+
+  const handleFilterChange = (filter: 'friends' | 'mine' | 'public') => {
+    setFeedFilter(filter);
+    loadFilterData(filter);
+  };
+
   // Filter journals based on active tab
-  const filteredJournals = journals.filter((j) => {
-    if (feedFilter === 'mine') return j.user_id === currentUserId;
-    if (feedFilter === 'public') return j.visibility === 'public';
+  const filteredJournals = localJournals.filter((j) => {
+    if (feedFilter === 'mine') {
+      return j.user_id === currentUserId;
+    }
+    if (feedFilter === 'public') {
+      return j.visibility === 'public';
+    }
     // 'friends'
     return j.user_id === currentUserId || j.visibility === 'friends' || j.visibility === 'public';
   });
@@ -130,7 +175,7 @@ export function JournalTab({
 
     setSubmitting(true);
     try {
-      const { error } = await createJournalEntry(currentUserId, {
+      const { data: newEntry, error } = await createJournalEntry(currentUserId, {
         title: title.trim() || undefined,
         content: content.trim(),
         mood,
@@ -138,7 +183,18 @@ export function JournalTab({
         tags: selectedTags,
       });
 
-      if (error) throw error;
+      if (error || !newEntry) throw error || new Error('Không thể lưu bài viết');
+
+      // OPTIMISTIC UPDATE: Render immediately on screen without waiting for F5!
+      const populatedEntry: JournalEntry = {
+        ...newEntry,
+        author: currentUserProfile,
+        reactions: [],
+        comments: [],
+        user_has_reacted: null,
+      };
+
+      setLocalJournals((prev) => [populatedEntry, ...prev.filter((j) => j.id !== populatedEntry.id)]);
 
       toast.success(
         visibility === 'friends'
@@ -153,6 +209,8 @@ export function JournalTab({
       setContent('');
       setMood(4);
       setSelectedTags([]);
+
+      // Trigger background sync
       onJournalsUpdated();
     } catch (err: any) {
       console.error('[JournalTab:createPost] Error:', err);
@@ -164,18 +222,57 @@ export function JournalTab({
 
   const handleDeletePost = async (journalId: string) => {
     try {
+      // Optimistic delete
+      setLocalJournals((prev) => prev.filter((j) => j.id !== journalId));
+
       const { success, error } = await deleteJournalEntry(journalId);
       if (error || !success) throw error || new Error('Không thể xóa bài viết');
+
       toast.success('Đã xóa bài viết');
       onJournalsUpdated();
     } catch (err: any) {
       console.error('[JournalTab:deletePost] Error:', err);
       toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể xóa bài viết');
+      loadFilterData(feedFilter);
     }
   };
 
   const handleReaction = async (journalId: string, emoji: string) => {
     try {
+      // Optimistic reaction update
+      setLocalJournals((prev) =>
+        prev.map((j) => {
+          if (j.id !== journalId) return j;
+          const currentReactions = j.reactions || [];
+          const existingUserReaction = j.user_has_reacted;
+
+          let updatedReactions = [...currentReactions];
+          let newUserReaction: string | null = emoji;
+
+          if (existingUserReaction === emoji) {
+            // Remove
+            updatedReactions = updatedReactions.filter((r) => !(r.user_id === currentUserId && r.reaction_type === emoji));
+            newUserReaction = null;
+          } else {
+            // Replace or add
+            updatedReactions = updatedReactions.filter((r) => r.user_id !== currentUserId);
+            updatedReactions.push({
+              id: 'temp-' + Date.now(),
+              journal_id: journalId,
+              user_id: currentUserId,
+              reaction_type: emoji,
+              created_at: new Date().toISOString(),
+            });
+          }
+
+          return {
+            ...j,
+            reactions: updatedReactions,
+            user_has_reacted: newUserReaction,
+          };
+        })
+      );
+
       const { error } = await toggleJournalReaction(currentUserId, journalId, emoji);
       if (error) throw error;
       onJournalsUpdated();
@@ -187,10 +284,23 @@ export function JournalTab({
 
   const handleSendComment = async (journalId: string) => {
     if (!commentText.trim()) return;
+    const textToSend = commentText.trim();
     setSubmittingComment(true);
+
     try {
-      const { error } = await addJournalComment(currentUserId, journalId, commentText);
-      if (error) throw error;
+      const { data: newComment, error } = await addJournalComment(currentUserId, journalId, textToSend);
+      if (error || !newComment) throw error || new Error('Không thể gửi bình luận');
+
+      // Optimistic comment addition
+      const commentWithAuthor: JournalComment = {
+        ...newComment,
+        author: currentUserProfile,
+      };
+
+      setLocalJournals((prev) =>
+        prev.map((j) => (j.id === journalId ? { ...j, comments: [...(j.comments || []), commentWithAuthor] } : j))
+      );
+
       setCommentText('');
       toast.success('Đã gửi bình luận');
       onJournalsUpdated();
@@ -202,10 +312,17 @@ export function JournalTab({
     }
   };
 
-  const handleDeleteComment = async (commentId: string) => {
+  const handleDeleteComment = async (journalId: string, commentId: string) => {
     try {
+      setLocalJournals((prev) =>
+        prev.map((j) =>
+          j.id === journalId ? { ...j, comments: (j.comments || []).filter((c) => c.id !== commentId) } : j
+        )
+      );
+
       const { success, error } = await deleteJournalComment(commentId);
       if (error || !success) throw error || new Error('Không thể xóa bình luận');
+
       toast.success('Đã xóa bình luận');
       onJournalsUpdated();
     } catch (err: any) {
@@ -231,6 +348,7 @@ export function JournalTab({
         shareNote
       );
       if (error || !success) throw error || new Error('Không thể chia sẻ bài viết');
+
       toast.success('Đã chia sẻ bài viết thành công!');
       setShareDialogOpen(false);
       onJournalsUpdated();
@@ -397,7 +515,7 @@ export function JournalTab({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-card/60 p-3 rounded-2xl border border-border/60 backdrop-blur-sm">
         <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-xl">
           <button
-            onClick={() => setFeedFilter('friends')}
+            onClick={() => handleFilterChange('friends')}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
               feedFilter === 'friends'
                 ? 'bg-background text-foreground shadow-xs'
@@ -408,7 +526,7 @@ export function JournalTab({
             Bản tin Bạn bè
           </button>
           <button
-            onClick={() => setFeedFilter('mine')}
+            onClick={() => handleFilterChange('mine')}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
               feedFilter === 'mine'
                 ? 'bg-background text-foreground shadow-xs'
@@ -419,7 +537,7 @@ export function JournalTab({
             Nhật ký của tôi
           </button>
           <button
-            onClick={() => setFeedFilter('public')}
+            onClick={() => handleFilterChange('public')}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
               feedFilter === 'public'
                 ? 'bg-background text-foreground shadow-xs'
@@ -431,18 +549,37 @@ export function JournalTab({
           </button>
         </div>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onOpenFriendsModal}
-          className="text-xs text-primary hover:text-primary gap-1 font-medium"
-        >
-          <Users className="h-3.5 w-3.5" /> Quản lý kết nối bạn bè
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={loadingFeed}
+            onClick={() => loadFilterData(feedFilter)}
+            className="text-xs text-muted-foreground hover:text-foreground h-8 px-2 gap-1"
+            title="Làm mới bài viết"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loadingFeed ? 'animate-spin' : ''}`} />
+            Làm mới
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onOpenFriendsModal}
+            className="text-xs text-primary hover:text-primary gap-1 font-medium h-8"
+          >
+            <Users className="h-3.5 w-3.5" /> Quản lý bạn bè
+          </Button>
+        </div>
       </div>
 
       {/* 3. JOURNAL POSTS FEED */}
-      {filteredJournals.length === 0 ? (
+      {loadingFeed ? (
+        <div className="space-y-4">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-44 rounded-2xl bg-muted/40 animate-pulse border border-border/40" />
+          ))}
+        </div>
+      ) : filteredJournals.length === 0 ? (
         <Card className="border-dashed border-border/80 bg-muted/10">
           <CardContent className="flex flex-col items-center justify-center py-14 text-center">
             <BookOpen className="h-10 w-10 text-muted-foreground/40 mb-3" />
@@ -454,7 +591,9 @@ export function JournalTab({
                 : 'Chưa có bài viết công khai'}
             </h3>
             <p className="text-xs text-muted-foreground max-w-sm mt-1">
-              {feedFilter === 'friends'
+              {feedFilter === 'mine'
+                ? 'Hãy viết và đăng nhật ký học tập đầu tiên của bạn ở khung phía trên!'
+                : feedFilter === 'friends'
                 ? 'Hãy kết nối thêm bạn bè hoặc bắt đầu chia sẻ quá trình học tập của bạn ở khung phía trên!'
                 : 'Ghi lại hành trình học tập mỗi ngày để theo dõi sự tiến bộ của bản thân.'}
             </p>
@@ -507,7 +646,7 @@ export function JournalTab({
                           href={author ? `/app/profile/${author.username}` : '#'}
                           className="font-semibold text-sm hover:text-primary transition-colors"
                         >
-                          {author?.username || 'Bạn học'}
+                          {author?.username || (isOwner ? currentUserProfile?.username : 'Bạn học')}
                         </Link>
                         {author?.verification_status === 'verified' && (
                           <Badge className="bg-success/10 text-success border-success/20 text-[10px] py-0">
@@ -519,7 +658,7 @@ export function JournalTab({
                           variant="secondary"
                           className="text-[10px] gap-1 px-1.5 py-0 bg-muted/60 text-muted-foreground font-normal"
                         >
-                          {journal.visibility === 'private' ? (
+                          {journal.visibility === 'private' || journal.is_private ? (
                             <>
                               <Lock className="h-2.5 w-2.5" /> Riêng tư
                             </>
@@ -755,7 +894,7 @@ export function JournalTab({
 
                               {isCommentAuthor && (
                                 <button
-                                  onClick={() => handleDeleteComment(c.id)}
+                                  onClick={() => handleDeleteComment(journal.id, c.id)}
                                   className="text-muted-foreground/60 hover:text-destructive p-1 rounded transition-colors"
                                   title="Xóa bình luận"
                                 >

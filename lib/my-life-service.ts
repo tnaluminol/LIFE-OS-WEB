@@ -42,6 +42,70 @@ function formatSupabaseError(context: string, err: any): Error {
   return new Error(message);
 }
 
+// Helper to enrich raw journal entries with profiles, reactions, and comments safely
+async function enrichJournalEntries(entries: any[], currentUserId: string): Promise<JournalEntry[]> {
+  if (!entries || entries.length === 0) return [];
+
+  const journalIds = entries.map((e) => e.id);
+  const authorIds = Array.from(new Set(entries.map((e) => e.user_id).filter(Boolean)));
+
+  const [profilesRes, reactionsRes, commentsRes] = await Promise.all([
+    authorIds.length > 0
+      ? supabase.from('profiles').select('*').in('id', authorIds)
+      : Promise.resolve({ data: [] }),
+    supabase.from('journal_reactions').select('*').in('journal_id', journalIds),
+    supabase.from('journal_comments').select('*').in('journal_id', journalIds).order('created_at', { ascending: true }),
+  ]);
+
+  const profilesMap: Record<string, Profile> = {};
+  (profilesRes.data || []).forEach((p: any) => {
+    profilesMap[p.id] = p as Profile;
+  });
+
+  // Also fetch comment author profiles if needed
+  const commentAuthorIds = Array.from(
+    new Set((commentsRes.data || []).map((c: any) => c.author_id).filter(Boolean))
+  ).filter((id) => !profilesMap[id]);
+
+  if (commentAuthorIds.length > 0) {
+    const { data: commentProfiles } = await supabase.from('profiles').select('*').in('id', commentAuthorIds);
+    (commentProfiles || []).forEach((p: any) => {
+      profilesMap[p.id] = p as Profile;
+    });
+  }
+
+  const reactionsMap: Record<string, JournalReaction[]> = {};
+  (reactionsRes.data || []).forEach((r: any) => {
+    if (!reactionsMap[r.journal_id]) reactionsMap[r.journal_id] = [];
+    reactionsMap[r.journal_id].push({
+      ...r,
+      user_profile: profilesMap[r.user_id] || null,
+    } as JournalReaction);
+  });
+
+  const commentsMap: Record<string, JournalComment[]> = {};
+  (commentsRes.data || []).forEach((c: any) => {
+    if (!commentsMap[c.journal_id]) commentsMap[c.journal_id] = [];
+    commentsMap[c.journal_id].push({
+      ...c,
+      author: profilesMap[c.author_id] || null,
+    } as JournalComment);
+  });
+
+  return entries.map((entry) => {
+    const entryReactions = reactionsMap[entry.id] || [];
+    const userReaction = entryReactions.find((r) => r.user_id === currentUserId)?.reaction_type || null;
+
+    return {
+      ...(entry as JournalEntry),
+      author: profilesMap[entry.user_id] || null,
+      reactions: entryReactions,
+      comments: commentsMap[entry.id] || [],
+      user_has_reacted: userReaction,
+    };
+  });
+}
+
 // ============================================================
 // 1. Preset Habits Library
 // ============================================================
@@ -146,7 +210,7 @@ export const PRESET_HABITS: PresetHabit[] = [
 export async function fetchUserHabits(userId: string): Promise<Habit[]> {
   try {
     if (!userId) return [];
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('habits')
       .select('*')
       .eq('user_id', userId)
@@ -220,7 +284,6 @@ export async function createCustomHabit(
 
     let { data, error } = await supabase.from('habits').insert(payload).select().single();
 
-    // Fallback if extended columns are not yet in DB
     if (error && error.message?.includes('column')) {
       console.warn('[MyLifeService:createCustomHabit] Extended columns missing, falling back to core fields');
       const corePayload = {
@@ -364,12 +427,23 @@ export async function deleteHabit(habitId: string): Promise<{ success: boolean; 
 export async function fetchMoodEntries(userId: string, limitDays = 14): Promise<MoodEntry[]> {
   try {
     if (!userId) return [];
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('mood_entries')
       .select('*')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(limitDays);
+
+    if (error && (error.code === '42P01' || error.message?.includes('does not exist'))) {
+      const fb = await supabase
+        .from('mood_logs')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(limitDays);
+      data = fb.data;
+      error = fb.error;
+    }
 
     if (error) {
       formatSupabaseError('fetchMoodEntries', error);
@@ -409,6 +483,12 @@ export async function logDailyMood(
       .select()
       .single();
 
+    if (error && (error.code === '42P01' || error.message?.includes('does not exist'))) {
+      const fb = await supabase.from('mood_logs').insert(payload).select().single();
+      data = fb.data;
+      error = fb.error;
+    }
+
     // Fallback if entry_date or tags column is missing on remote DB
     if (error && error.message?.includes('column')) {
       console.warn('[MyLifeService:logDailyMood] Falling back to core columns for mood_entries');
@@ -417,9 +497,12 @@ export async function logDailyMood(
         mood: Number(mood) || 3,
         note: note?.trim() || null,
       };
-      const fallbackRes = await supabase.from('mood_entries').insert(corePayload).select().single();
-      data = fallbackRes.data;
-      error = fallbackRes.error;
+      let fb2 = await supabase.from('mood_entries').insert(corePayload).select().single();
+      if (fb2.error) {
+        fb2 = await supabase.from('mood_logs').insert(corePayload).select().single();
+      }
+      data = fb2.data;
+      error = fb2.error;
     }
 
     if (error) {
@@ -690,76 +773,93 @@ export async function connectWithUser(
 // 5. Learning Journal Service (Social & Friends Interactions)
 // ============================================================
 
+/**
+ * Fetch all journals of a specific user regardless of visibility (private, friends, public)
+ */
+export async function fetchUserJournals(userId: string): Promise<JournalEntry[]> {
+  try {
+    if (!userId) return [];
+
+    let { data: entries, error } = await supabase
+      .from('journal_entries')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    // Fallback if table name is journals
+    if (error && (error.code === '42P01' || error.message?.includes('does not exist'))) {
+      const fb = await supabase
+        .from('journals')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+      entries = fb.data;
+      error = fb.error;
+    }
+
+    if (error) {
+      formatSupabaseError('fetchUserJournals', error);
+      return [];
+    }
+
+    if (!entries || entries.length === 0) return [];
+    return await enrichJournalEntries(entries, userId);
+  } catch (err) {
+    console.error('[MyLifeService:fetchUserJournals] Unexpected error:', err);
+    return [];
+  }
+}
+
+/**
+ * Fetch journal feed based on selected filter: 'all' | 'friends' | 'mine' | 'public'
+ */
 export async function fetchJournalFeed(
   userId: string,
-  filter: 'friends' | 'mine' | 'public' = 'friends'
+  filter: 'friends' | 'mine' | 'public' | 'all' = 'friends'
 ): Promise<JournalEntry[]> {
   try {
     if (!userId) return [];
 
-    let query = supabase
-      .from('journal_entries')
-      .select(`
-        *,
-        author:profiles(*)
-      `)
-      .order('created_at', { ascending: false })
-      .limit(30);
+    let query = supabase.from('journal_entries').select('*');
 
     if (filter === 'mine') {
+      // Get all journals of the current user (private, friends, public)
       query = query.eq('user_id', userId);
     } else if (filter === 'public') {
       query = query.eq('visibility', 'public');
+    } else if (filter === 'friends') {
+      query = query.or(`user_id.eq.${userId},visibility.eq.friends,visibility.eq.public`);
     } else {
+      // 'all'
       query = query.or(`user_id.eq.${userId},visibility.eq.friends,visibility.eq.public`);
     }
 
-    const { data: entries, error } = await query;
+    let { data: entries, error } = await query.order('created_at', { ascending: false }).limit(40);
+
+    // Fallback if table name is journals
+    if (error && (error.code === '42P01' || error.message?.includes('does not exist'))) {
+      let fQuery = supabase.from('journals').select('*');
+      if (filter === 'mine') {
+        fQuery = fQuery.eq('user_id', userId);
+      } else if (filter === 'public') {
+        fQuery = fQuery.eq('visibility', 'public');
+      } else if (filter === 'friends') {
+        fQuery = fQuery.or(`user_id.eq.${userId},visibility.eq.friends,visibility.eq.public`);
+      } else {
+        fQuery = fQuery.or(`user_id.eq.${userId},visibility.eq.friends,visibility.eq.public`);
+      }
+      const fallback = await fQuery.order('created_at', { ascending: false }).limit(40);
+      entries = fallback.data;
+      error = fallback.error;
+    }
+
     if (error) {
       formatSupabaseError('fetchJournalFeed', error);
       return [];
     }
 
     if (!entries || entries.length === 0) return [];
-
-    const journalIds = entries.map((e) => e.id);
-
-    const [reactionsRes, commentsRes] = await Promise.all([
-      supabase
-        .from('journal_reactions')
-        .select('*, user_profile:profiles(*)')
-        .in('journal_id', journalIds),
-      supabase
-        .from('journal_comments')
-        .select('*, author:profiles(*)')
-        .in('journal_id', journalIds)
-        .order('created_at', { ascending: true }),
-    ]);
-
-    const reactionsMap: Record<string, JournalReaction[]> = {};
-    const commentsMap: Record<string, JournalComment[]> = {};
-
-    (reactionsRes.data || []).forEach((r: any) => {
-      if (!reactionsMap[r.journal_id]) reactionsMap[r.journal_id] = [];
-      reactionsMap[r.journal_id].push(r as JournalReaction);
-    });
-
-    (commentsRes.data || []).forEach((c: any) => {
-      if (!commentsMap[c.journal_id]) commentsMap[c.journal_id] = [];
-      commentsMap[c.journal_id].push(c as JournalComment);
-    });
-
-    return entries.map((entry) => {
-      const entryReactions = reactionsMap[entry.id] || [];
-      const userReaction = entryReactions.find((r) => r.user_id === userId)?.reaction_type || null;
-
-      return {
-        ...(entry as JournalEntry),
-        reactions: entryReactions,
-        comments: commentsMap[entry.id] || [],
-        user_has_reacted: userReaction,
-      };
-    });
+    return await enrichJournalEntries(entries, userId);
   } catch (err) {
     console.error('[MyLifeService:fetchJournalFeed] Unexpected error:', err);
     return [];
@@ -799,13 +899,17 @@ export async function createJournalEntry(
     let { data, error } = await supabase
       .from('journal_entries')
       .insert(insertPayload)
-      .select(`
-        *,
-        author:profiles(*)
-      `)
+      .select('*')
       .single();
 
-    // Fallback if visibility or tags column is missing on remote DB
+    // Fallback if table name is journals
+    if (error && (error.code === '42P01' || error.message?.includes('does not exist'))) {
+      const fb = await supabase.from('journals').insert(insertPayload).select('*').single();
+      data = fb.data;
+      error = fb.error;
+    }
+
+    // Fallback if optional columns are missing on remote DB
     if (error && error.message?.includes('column')) {
       console.warn('[MyLifeService:createJournalEntry] Falling back to core columns for journal_entries');
       const corePayload = {
@@ -815,11 +919,10 @@ export async function createJournalEntry(
         mood: payload.mood || 3,
         is_private: visibility === 'private',
       };
-      const fallbackRes = await supabase
-        .from('journal_entries')
-        .insert(corePayload)
-        .select(`*, author:profiles(*)`)
-        .single();
+      let fallbackRes = await supabase.from('journal_entries').insert(corePayload).select('*').single();
+      if (fallbackRes.error) {
+        fallbackRes = await supabase.from('journals').insert(corePayload).select('*').single();
+      }
       data = fallbackRes.data;
       error = fallbackRes.error;
     }
@@ -827,7 +930,23 @@ export async function createJournalEntry(
     if (error) {
       return { data: null, error: formatSupabaseError('createJournalEntry', error) };
     }
-    return { data: data as JournalEntry, error: null };
+
+    // Fetch author profile
+    const { data: authorProfile } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .maybeSingle();
+
+    const createdEntry: JournalEntry = {
+      ...(data as JournalEntry),
+      author: authorProfile as Profile | null,
+      reactions: [],
+      comments: [],
+      user_has_reacted: null,
+    };
+
+    return { data: createdEntry, error: null };
   } catch (err) {
     console.error('[MyLifeService:createJournalEntry] Exception:', err);
     return { data: null, error: err as Error };
@@ -836,7 +955,11 @@ export async function createJournalEntry(
 
 export async function deleteJournalEntry(journalId: string): Promise<{ success: boolean; error: Error | null }> {
   try {
-    const { error } = await supabase.from('journal_entries').delete().eq('id', journalId);
+    let { error } = await supabase.from('journal_entries').delete().eq('id', journalId);
+    if (error && (error.code === '42P01' || error.message?.includes('does not exist'))) {
+      const fb = await supabase.from('journals').delete().eq('id', journalId);
+      error = fb.error;
+    }
     if (error) {
       return { success: false, error: formatSupabaseError('deleteJournalEntry', error) };
     }
@@ -911,16 +1034,21 @@ export async function addJournalComment(
         author_id: userId,
         content: content.trim(),
       })
-      .select(`
-        *,
-        author:profiles(*)
-      `)
+      .select('*')
       .single();
 
     if (error) {
       return { data: null, error: formatSupabaseError('addJournalComment', error) };
     }
-    return { data: data as JournalComment, error: null };
+
+    const { data: authorProfile } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
+
+    const createdComment: JournalComment = {
+      ...(data as JournalComment),
+      author: authorProfile as Profile | null,
+    };
+
+    return { data: createdComment, error: null };
   } catch (err) {
     console.error('[MyLifeService:addJournalComment] Exception:', err);
     return { data: null, error: err as Error };
