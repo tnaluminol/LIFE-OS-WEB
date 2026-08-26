@@ -1,25 +1,10 @@
-import './globals.css';
 import type { Metadata } from 'next';
-import { Inter, Plus_Jakarta_Sans } from 'next/font/google';
-import { ThemeProvider } from '@/components/theme-provider';
-import { AuthProvider } from '@/components/auth-provider';
-import { LanguageProvider } from '@/components/language-provider';
-import { Toaster } from '@/components/ui/sonner';
-
-const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
-const jakarta = Plus_Jakarta_Sans({
-  subsets: ['latin'],
-  variable: '--font-display',
-});
+import { Providers } from '@/components/providers';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Life OS — A Social OS for Young Learners',
-  description:
-    'A safe space to learn, connect, build projects, and grow. Not another social media trap.',
-  themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
-    { media: '(prefers-color-scheme: dark)', color: '#0a1518' },
-  ],
+  title: 'LIFE OS - Personal Operating System',
+  description: 'Manage tasks, habits, finances, and personal knowledge with Life OS.',
 };
 
 export default function RootLayout({
@@ -28,20 +13,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body
-        className={`${inter.variable} ${jakarta.variable} font-sans`}
-        suppressHydrationWarning
-      >
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <LanguageProvider><AuthProvider>{children}</AuthProvider></LanguageProvider>
-          <Toaster />
-        </ThemeProvider>
+    <html lang="vi" suppressHydrationWarning>
+      <body className="min-h-screen bg-background font-sans text-foreground antialiased selection:bg-indigo-500 selection:text-white">
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
