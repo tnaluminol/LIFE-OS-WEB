@@ -13,7 +13,7 @@ import type {
 } from './types';
 
 // Helper to ensure profile exists for user before foreign key operations
-async function ensureUserProfileExists(userId: string): Promise<void> {
+export async function ensureUserProfileExists(userId: string): Promise<void> {
   try {
     const { data } = await supabase.from('profiles').select('id').eq('id', userId).maybeSingle();
     if (!data) {

@@ -490,3 +490,88 @@ export interface ForumPostReaction {
   reaction_type: string;
   created_at: string;
 }
+
+// ============================================================
+// Flashcards & Quiz Module (Quizlet Clone) Types
+// ============================================================
+
+export type FlashcardCardType = 'flashcard_2sided' | 'multiple_choice' | 'fill_in_blank';
+export type FlashcardSubject = 'physics' | 'math' | 'chemistry' | 'english' | 'biology' | 'history' | 'geography' | 'informatics' | 'general';
+export type FlashcardGradeLevel = 'grade_10' | 'grade_11' | 'grade_12' | 'university' | 'ielts' | 'other';
+export type QuizStudyMode = 'practice' | 'exam';
+export type SpacedRepetitionRating = 'easy' | 'medium' | 'hard';
+
+export interface MultipleChoiceOption {
+  id: string; // 'A' | 'B' | 'C' | 'D'
+  text: string;
+}
+
+export interface FlashcardSet {
+  id: string;
+  user_id: string;
+  title: string;
+  description: string | null;
+  subject: FlashcardSubject;
+  grade_level: FlashcardGradeLevel;
+  visibility: ProfileVisibility;
+  tags: string[];
+  card_count: number;
+  likes_count: number;
+  is_ai_generated: boolean;
+  cover_image: string | null;
+  author?: Profile;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Flashcard {
+  id: string;
+  set_id: string;
+  card_type: FlashcardCardType;
+  front_text: string; // question / prompt / math formula (LaTeX) / vocab
+  back_text: string; // answer / definition / explanation / solution
+  options?: MultipleChoiceOption[]; // for multiple_choice (A, B, C, D)
+  correct_option?: string | null; // e.g. 'A', or text for fill_in_blank
+  explanation?: string | null; // detailed solution or notes
+  hint?: string | null;
+  order_index: number;
+  ease_factor: number; // default 2.5
+  interval_days: number; // default 1
+  repetitions: number; // default 0
+  next_review_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QuizAnswerSummaryItem {
+  card_id: string;
+  card_type: FlashcardCardType;
+  question: string;
+  user_answer: string;
+  correct_answer: string;
+  is_correct: boolean;
+  explanation?: string | null;
+}
+
+export interface QuizResult {
+  id: string;
+  set_id: string;
+  user_id: string;
+  mode: QuizStudyMode;
+  total_questions: number;
+  correct_answers: number;
+  score_percentage: number;
+  time_spent_seconds: number;
+  answers_summary: QuizAnswerSummaryItem[];
+  created_at: string;
+  set?: FlashcardSet;
+}
+
+export interface SpacedRepetitionLog {
+  id: string;
+  card_id: string;
+  user_id: string;
+  rating: SpacedRepetitionRating;
+  interval_days: number;
+  reviewed_at: string;
+}

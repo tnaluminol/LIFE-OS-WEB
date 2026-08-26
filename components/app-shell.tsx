@@ -38,6 +38,7 @@ const navItems = [
   { href: '/app/study', label: 'Challenges', icon: BookOpen },
   { href: '/app/projects', label: 'Projects', icon: Target },
   { href: '/app/my-life', label: 'My Life', icon: Heart },
+  { href: '/app/flashcards', label: 'Flashcards', icon: BookOpen },
   { href: '/app/ai', label: 'AI', icon: Bot },
 ];
 
