@@ -132,13 +132,14 @@ export function MoodTab({
         todayStr
       );
 
-      if (error || !data) throw error || new Error('Failed to save mood');
+      if (error || !data) throw error || new Error('Không thể lưu cảm xúc');
 
       toast.success('Đã lưu nhật ký cảm xúc hôm nay!');
       setNote('');
       onMoodUpdated();
-    } catch {
-      toast.error('Không thể lưu cảm xúc. Vui lòng thử lại.');
+    } catch (err: any) {
+      console.error('[MoodTab:saveMood] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể lưu cảm xúc. Vui lòng thử lại.');
     } finally {
       setSavingMood(false);
     }
@@ -164,12 +165,13 @@ export function MoodTab({
         habit.streak || 0
       );
 
-      if (error || !success) throw error;
+      if (error || !success) throw error || new Error('Không thể cập nhật thói quen');
 
       toast.success(`🎉 Tuyệt vời! Đã hoàn thành thói quen "${habit.name}" để phục hồi tinh thần!`);
       onHabitsUpdated();
-    } catch {
-      toast.error('Không thể cập nhật thói quen');
+    } catch (err: any) {
+      console.error('[MoodTab:executeHabit] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể cập nhật thói quen');
     } finally {
       setActionLoadingId(null);
     }
@@ -179,12 +181,13 @@ export function MoodTab({
     setActionLoadingId(preset.name);
     try {
       const { data, error } = await addPresetHabit(currentUserId, preset);
-      if (error || !data) throw error;
+      if (error || !data) throw error || new Error('Không thể thêm thói quen');
 
       toast.success(`Đã thêm thói quen gợi ý "${preset.name}" vào danh sách Habits của bạn!`);
       onHabitsUpdated();
-    } catch {
-      toast.error('Không thể thêm thói quen');
+    } catch (err: any) {
+      console.error('[MoodTab:addSuggestedPreset] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể thêm thói quen');
     } finally {
       setActionLoadingId(null);
     }

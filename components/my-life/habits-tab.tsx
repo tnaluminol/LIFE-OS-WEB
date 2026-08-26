@@ -107,7 +107,7 @@ export function HabitsTab({
         habit.streak || 0
       );
 
-      if (error || !success) throw error;
+      if (error || !success) throw error || new Error('Không thể cập nhật thói quen');
 
       toast.success(
         isCompleted
@@ -115,8 +115,9 @@ export function HabitsTab({
           : `🎉 Tuyệt vời! Đã hoàn thành thói quen "${habit.name}" hôm nay!`
       );
       onHabitsUpdated();
-    } catch {
-      toast.error('Không thể cập nhật thói quen');
+    } catch (err: any) {
+      console.error('[HabitsTab:toggleHabit] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể cập nhật thói quen');
     }
   };
 
@@ -124,13 +125,14 @@ export function HabitsTab({
     setAddingPresetKey(preset.name);
     try {
       const { data, error } = await addPresetHabit(currentUserId, preset);
-      if (error || !data) throw error;
+      if (error || !data) throw error || new Error('Không thể thêm thói quen');
 
       toast.success(`Đã thêm thói quen "${preset.name}" vào danh sách!`);
       onHabitsUpdated();
       onOpenPresetModalChange(false);
-    } catch {
-      toast.error('Không thể thêm thói quen');
+    } catch (err: any) {
+      console.error('[HabitsTab:addPreset] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể thêm thói quen');
     } finally {
       setAddingPresetKey(null);
     }
@@ -152,15 +154,16 @@ export function HabitsTab({
         target_days_per_week: targetDays,
       });
 
-      if (error || !data) throw error;
+      if (error || !data) throw error || new Error('Không thể tạo thói quen');
 
       toast.success('Đã tạo thói quen mới thành công!');
       setHabitName('');
       setSelectedEmoji('📖');
       setCustomModalOpen(false);
       onHabitsUpdated();
-    } catch {
-      toast.error('Không thể tạo thói quen');
+    } catch (err: any) {
+      console.error('[HabitsTab:createCustom] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể tạo thói quen');
     } finally {
       setSubmittingCustom(false);
     }
@@ -170,11 +173,12 @@ export function HabitsTab({
     if (!confirm(`Bạn có chắc muốn xóa thói quen "${habitName}" không?`)) return;
     try {
       const { success, error } = await deleteHabit(habitId);
-      if (error || !success) throw error;
+      if (error || !success) throw error || new Error('Không thể xóa thói quen');
       toast.success('Đã xóa thói quen');
       onHabitsUpdated();
-    } catch {
-      toast.error('Không thể xóa thói quen');
+    } catch (err: any) {
+      console.error('[HabitsTab:deleteHabit] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể xóa thói quen');
     }
   };
 

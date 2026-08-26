@@ -12,6 +12,36 @@ import type {
   Profile,
 } from './types';
 
+// Helper to ensure profile exists for user before foreign key operations
+async function ensureUserProfileExists(userId: string): Promise<void> {
+  try {
+    const { data } = await supabase.from('profiles').select('id').eq('id', userId).maybeSingle();
+    if (!data) {
+      console.warn('[MyLifeService] User profile missing, auto-creating profile for:', userId);
+      await supabase.from('profiles').upsert({
+        id: userId,
+        username: `student_${userId.slice(0, 8)}`,
+        full_name: 'Học sinh Life OS',
+        profile_visibility: 'public',
+      });
+    }
+  } catch (err) {
+    console.error('[MyLifeService] Error in ensureUserProfileExists:', err);
+  }
+}
+
+// Helper to format error details
+function formatSupabaseError(context: string, err: any): Error {
+  const message = err?.message || err?.details || err?.hint || 'Lỗi không xác định từ máy chủ';
+  console.error(`[MyLifeService:${context}] Database Error:`, {
+    message: err?.message,
+    details: err?.details,
+    hint: err?.hint,
+    code: err?.code,
+  });
+  return new Error(message);
+}
+
 // ============================================================
 // 1. Preset Habits Library
 // ============================================================
@@ -115,6 +145,7 @@ export const PRESET_HABITS: PresetHabit[] = [
 
 export async function fetchUserHabits(userId: string): Promise<Habit[]> {
   try {
+    if (!userId) return [];
     const { data, error } = await supabase
       .from('habits')
       .select('*')
@@ -122,12 +153,12 @@ export async function fetchUserHabits(userId: string): Promise<Habit[]> {
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('Error fetching habits:', error);
+      formatSupabaseError('fetchUserHabits', error);
       return [];
     }
     return (data as Habit[]) || [];
   } catch (err) {
-    console.error('Unexpected error fetching habits:', err);
+    console.error('[MyLifeService:fetchUserHabits] Unexpected error:', err);
     return [];
   }
 }
@@ -138,6 +169,7 @@ export async function fetchHabitLogsForDates(
   endDate: string
 ): Promise<HabitLog[]> {
   try {
+    if (!userId) return [];
     const { data, error } = await supabase
       .from('habit_logs')
       .select('*')
@@ -146,12 +178,12 @@ export async function fetchHabitLogsForDates(
       .lte('completed_date', endDate);
 
     if (error) {
-      console.error('Error fetching habit logs:', error);
+      formatSupabaseError('fetchHabitLogsForDates', error);
       return [];
     }
     return (data as HabitLog[]) || [];
   } catch (err) {
-    console.error('Unexpected error fetching habit logs:', err);
+    console.error('[MyLifeService:fetchHabitLogsForDates] Unexpected error:', err);
     return [];
   }
 }
@@ -168,25 +200,47 @@ export async function createCustomHabit(
   }
 ): Promise<{ data: Habit | null; error: Error | null }> {
   try {
-    const { data, error } = await supabase
-      .from('habits')
-      .insert({
+    if (!userId || !habit.name.trim()) {
+      return { data: null, error: new Error('Thiếu thông tin người dùng hoặc tên thói quen') };
+    }
+
+    await ensureUserProfileExists(userId);
+
+    const payload: any = {
+      user_id: userId,
+      name: habit.name.trim(),
+      icon: habit.icon || '✅',
+      category: habit.category || 'general',
+      color: habit.color || 'teal',
+      frequency: habit.frequency || 'daily',
+      target_days_per_week: habit.target_days_per_week || 7,
+      streak: 0,
+      is_preset: false,
+    };
+
+    let { data, error } = await supabase.from('habits').insert(payload).select().single();
+
+    // Fallback if extended columns are not yet in DB
+    if (error && error.message?.includes('column')) {
+      console.warn('[MyLifeService:createCustomHabit] Extended columns missing, falling back to core fields');
+      const corePayload = {
         user_id: userId,
         name: habit.name.trim(),
         icon: habit.icon || '✅',
-        category: habit.category || 'general',
-        color: habit.color || 'teal',
-        frequency: habit.frequency || 'daily',
-        target_days_per_week: habit.target_days_per_week || 7,
+        frequency: 'daily',
         streak: 0,
-        is_preset: false,
-      })
-      .select()
-      .single();
+      };
+      const fallbackRes = await supabase.from('habits').insert(corePayload).select().single();
+      data = fallbackRes.data;
+      error = fallbackRes.error;
+    }
 
-    if (error) throw error;
+    if (error) {
+      return { data: null, error: formatSupabaseError('createCustomHabit', error) };
+    }
     return { data: data as Habit, error: null };
   } catch (err) {
+    console.error('[MyLifeService:createCustomHabit] Exception:', err);
     return { data: null, error: err as Error };
   }
 }
@@ -196,25 +250,44 @@ export async function addPresetHabit(
   preset: PresetHabit
 ): Promise<{ data: Habit | null; error: Error | null }> {
   try {
-    const { data, error } = await supabase
-      .from('habits')
-      .insert({
+    if (!userId) return { data: null, error: new Error('Người dùng chưa đăng nhập') };
+
+    await ensureUserProfileExists(userId);
+
+    const payload: any = {
+      user_id: userId,
+      name: preset.name,
+      icon: preset.icon,
+      category: preset.category,
+      color: preset.color,
+      frequency: 'daily',
+      target_days_per_week: preset.suggestedTarget,
+      streak: 0,
+      is_preset: true,
+    };
+
+    let { data, error } = await supabase.from('habits').insert(payload).select().single();
+
+    if (error && error.message?.includes('column')) {
+      console.warn('[MyLifeService:addPresetHabit] Falling back to core columns');
+      const corePayload = {
         user_id: userId,
         name: preset.name,
         icon: preset.icon,
-        category: preset.category,
-        color: preset.color,
         frequency: 'daily',
-        target_days_per_week: preset.suggestedTarget,
         streak: 0,
-        is_preset: true,
-      })
-      .select()
-      .single();
+      };
+      const fallbackRes = await supabase.from('habits').insert(corePayload).select().single();
+      data = fallbackRes.data;
+      error = fallbackRes.error;
+    }
 
-    if (error) throw error;
+    if (error) {
+      return { data: null, error: formatSupabaseError('addPresetHabit', error) };
+    }
     return { data: data as Habit, error: null };
   } catch (err) {
+    console.error('[MyLifeService:addPresetHabit] Exception:', err);
     return { data: null, error: err as Error };
   }
 }
@@ -227,8 +300,11 @@ export async function toggleHabitLog(
   currentStreak: number
 ): Promise<{ success: boolean; newStreak: number; error: Error | null }> {
   try {
+    if (!userId || !habitId) return { success: false, newStreak: currentStreak, error: new Error('Thiếu ID') };
+
+    await ensureUserProfileExists(userId);
+
     if (isCurrentlyCompleted) {
-      // Remove completion log
       const { error } = await supabase
         .from('habit_logs')
         .delete()
@@ -236,14 +312,15 @@ export async function toggleHabitLog(
         .eq('user_id', userId)
         .eq('completed_date', date);
 
-      if (error) throw error;
+      if (error) {
+        return { success: false, newStreak: currentStreak, error: formatSupabaseError('toggleHabitLog:delete', error) };
+      }
 
       const newStreak = Math.max(0, currentStreak - 1);
       await supabase.from('habits').update({ streak: newStreak }).eq('id', habitId);
 
       return { success: true, newStreak, error: null };
     } else {
-      // Add completion log
       const { error } = await supabase
         .from('habit_logs')
         .insert({
@@ -252,7 +329,9 @@ export async function toggleHabitLog(
           completed_date: date,
         });
 
-      if (error) throw error;
+      if (error) {
+        return { success: false, newStreak: currentStreak, error: formatSupabaseError('toggleHabitLog:insert', error) };
+      }
 
       const newStreak = currentStreak + 1;
       await supabase.from('habits').update({ streak: newStreak }).eq('id', habitId);
@@ -260,6 +339,7 @@ export async function toggleHabitLog(
       return { success: true, newStreak, error: null };
     }
   } catch (err) {
+    console.error('[MyLifeService:toggleHabitLog] Exception:', err);
     return { success: false, newStreak: currentStreak, error: err as Error };
   }
 }
@@ -267,9 +347,12 @@ export async function toggleHabitLog(
 export async function deleteHabit(habitId: string): Promise<{ success: boolean; error: Error | null }> {
   try {
     const { error } = await supabase.from('habits').delete().eq('id', habitId);
-    if (error) throw error;
+    if (error) {
+      return { success: false, error: formatSupabaseError('deleteHabit', error) };
+    }
     return { success: true, error: null };
   } catch (err) {
+    console.error('[MyLifeService:deleteHabit] Exception:', err);
     return { success: false, error: err as Error };
   }
 }
@@ -280,6 +363,7 @@ export async function deleteHabit(habitId: string): Promise<{ success: boolean; 
 
 export async function fetchMoodEntries(userId: string, limitDays = 14): Promise<MoodEntry[]> {
   try {
+    if (!userId) return [];
     const { data, error } = await supabase
       .from('mood_entries')
       .select('*')
@@ -288,12 +372,12 @@ export async function fetchMoodEntries(userId: string, limitDays = 14): Promise<
       .limit(limitDays);
 
     if (error) {
-      console.error('Error fetching mood entries:', error);
+      formatSupabaseError('fetchMoodEntries', error);
       return [];
     }
     return (data as MoodEntry[]) || [];
   } catch (err) {
-    console.error('Unexpected error fetching mood entries:', err);
+    console.error('[MyLifeService:fetchMoodEntries] Unexpected error:', err);
     return [];
   }
 }
@@ -306,36 +390,52 @@ export async function logDailyMood(
   entryDate?: string
 ): Promise<{ data: MoodEntry | null; error: Error | null }> {
   try {
+    if (!userId) return { data: null, error: new Error('Người dùng chưa đăng nhập') };
+
+    await ensureUserProfileExists(userId);
+
     const today = entryDate || new Date().toISOString().split('T')[0];
-    const { data, error } = await supabase
+    const payload: any = {
+      user_id: userId,
+      mood: Number(mood) || 3,
+      note: note?.trim() || null,
+      tags: tags || [],
+      entry_date: today,
+    };
+
+    let { data, error } = await supabase
       .from('mood_entries')
-      .insert({
-        user_id: userId,
-        mood,
-        note: note?.trim() || null,
-        tags,
-        entry_date: today,
-      })
+      .insert(payload)
       .select()
       .single();
 
-    if (error) throw error;
+    // Fallback if entry_date or tags column is missing on remote DB
+    if (error && error.message?.includes('column')) {
+      console.warn('[MyLifeService:logDailyMood] Falling back to core columns for mood_entries');
+      const corePayload = {
+        user_id: userId,
+        mood: Number(mood) || 3,
+        note: note?.trim() || null,
+      };
+      const fallbackRes = await supabase.from('mood_entries').insert(corePayload).select().single();
+      data = fallbackRes.data;
+      error = fallbackRes.error;
+    }
+
+    if (error) {
+      return { data: null, error: formatSupabaseError('logDailyMood', error) };
+    }
     return { data: data as MoodEntry, error: null };
   } catch (err) {
+    console.error('[MyLifeService:logDailyMood] Exception:', err);
     return { data: null, error: err as Error };
   }
 }
 
-/**
- * Intelligent Analysis & Recommendation Engine:
- * Analyzes the user's past 7 days of mood entries and dynamically recommends habits
- * from the user's own active habits list, or suggests adding vital wellness habits.
- */
 export function analyzeWeeklyMoodAndRecommendations(
   moodEntries: MoodEntry[],
   userHabits: Habit[]
 ): MoodAnalysisResult {
-  // Take up to the 7 most recent entries
   const recentEntries = moodEntries.slice(0, 7);
 
   if (recentEntries.length === 0) {
@@ -356,9 +456,9 @@ export function analyzeWeeklyMoodAndRecommendations(
   }
 
   let totalScore = 0;
-  let positiveCount = 0; // mood 4 or 5
-  let negativeCount = 0; // mood 1 or 2
-  let neutralCount = 0;  // mood 3
+  let positiveCount = 0;
+  let negativeCount = 0;
+  let neutralCount = 0;
 
   const moodCounts: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
 
@@ -372,7 +472,6 @@ export function analyzeWeeklyMoodAndRecommendations(
 
   const averageMood = Number((totalScore / recentEntries.length).toFixed(1));
 
-  // Determine dominant mood
   let dominantMoodLevel = 3;
   let maxCount = -1;
   for (let m = 1; m <= 5; m++) {
@@ -387,10 +486,7 @@ export function analyzeWeeklyMoodAndRecommendations(
   const dominantMood = moodLabels[dominantMoodLevel - 1];
   const dominantMoodEmoji = moodEmojis[dominantMoodLevel - 1];
 
-  // Logic: Negative mood case vs Positive mood case
   if (negativeCount >= 3 || averageMood < 2.8) {
-    // NEGATIVE CASE
-    // Find habits in user's list that help recover (mindfulness, fitness, health)
     const wellnessHabits = userHabits.filter((h) =>
       ['mindfulness', 'fitness', 'health'].includes(h.category || '') ||
       h.name.toLowerCase().includes('thiền') ||
@@ -404,7 +500,6 @@ export function analyzeWeeklyMoodAndRecommendations(
 
     const recommendations: MoodAnalysisResult['recommendedHabits'] = [];
 
-    // Prioritize user's own habits first!
     if (wellnessHabits.length > 0) {
       wellnessHabits.slice(0, 3).forEach((h) => {
         let reason = 'Giúp xua tan mệt mỏi và tái tạo năng lượng';
@@ -425,7 +520,6 @@ export function analyzeWeeklyMoodAndRecommendations(
       });
     }
 
-    // If user has few or no wellness habits, recommend presets
     if (recommendations.length < 2) {
       const presetsToSuggest = PRESET_HABITS.filter(
         (p) =>
@@ -458,10 +552,7 @@ export function analyzeWeeklyMoodAndRecommendations(
       recommendedHabits: recommendations,
     };
   } else if (positiveCount >= 3 || averageMood >= 3.6) {
-    // POSITIVE CASE
-    // Find active habits that user is excelling at
     const highStreakHabits = [...userHabits].sort((a, b) => b.streak - a.streak).slice(0, 2);
-
     const recommendations: MoodAnalysisResult['recommendedHabits'] = [];
 
     if (highStreakHabits.length > 0) {
@@ -474,7 +565,6 @@ export function analyzeWeeklyMoodAndRecommendations(
       });
     }
 
-    // Suggest challenging or deep study preset
     const studyPreset = PRESET_HABITS.find((p) => p.name.includes('Viết code') || p.name.includes('Đọc sách'));
     if (studyPreset && !userHabits.some((uh) => uh.name.includes(studyPreset.name.slice(0, 4)))) {
       recommendations.push({
@@ -500,7 +590,6 @@ export function analyzeWeeklyMoodAndRecommendations(
       recommendedHabits: recommendations,
     };
   } else {
-    // NEUTRAL / BALANCED CASE
     const recommendations: MoodAnalysisResult['recommendedHabits'] = [];
     if (userHabits.length > 0) {
       recommendations.push({
@@ -534,6 +623,7 @@ export function analyzeWeeklyMoodAndRecommendations(
 
 export async function fetchConnectedFriends(userId: string): Promise<Profile[]> {
   try {
+    if (!userId) return [];
     const { data, error } = await supabase
       .from('friendships')
       .select(`
@@ -548,7 +638,7 @@ export async function fetchConnectedFriends(userId: string): Promise<Profile[]> 
       .eq('status', 'accepted');
 
     if (error) {
-      console.error('Error fetching friends:', error);
+      formatSupabaseError('fetchConnectedFriends', error);
       return [];
     }
 
@@ -563,7 +653,7 @@ export async function fetchConnectedFriends(userId: string): Promise<Profile[]> 
 
     return friends;
   } catch (err) {
-    console.error('Unexpected error in fetchConnectedFriends:', err);
+    console.error('[MyLifeService:fetchConnectedFriends] Unexpected error:', err);
     return [];
   }
 }
@@ -573,14 +663,25 @@ export async function connectWithUser(
   targetUserId: string
 ): Promise<{ success: boolean; error: Error | null }> {
   try {
+    if (!currentUserId || !targetUserId) {
+      return { success: false, error: new Error('Thiếu thông tin người dùng') };
+    }
+
+    await ensureUserProfileExists(currentUserId);
+    await ensureUserProfileExists(targetUserId);
+
     const { error } = await supabase.from('friendships').insert({
       user_id: currentUserId,
       friend_id: targetUserId,
       status: 'accepted',
     });
-    if (error) throw error;
+
+    if (error) {
+      return { success: false, error: formatSupabaseError('connectWithUser', error) };
+    }
     return { success: true, error: null };
   } catch (err) {
+    console.error('[MyLifeService:connectWithUser] Exception:', err);
     return { success: false, error: err as Error };
   }
 }
@@ -594,6 +695,8 @@ export async function fetchJournalFeed(
   filter: 'friends' | 'mine' | 'public' = 'friends'
 ): Promise<JournalEntry[]> {
   try {
+    if (!userId) return [];
+
     let query = supabase
       .from('journal_entries')
       .select(`
@@ -608,14 +711,12 @@ export async function fetchJournalFeed(
     } else if (filter === 'public') {
       query = query.eq('visibility', 'public');
     } else {
-      // 'friends' filter: entries by self or friends with visibility 'friends' or 'public'
-      // RLS policy already handles filtering for friends or self!
       query = query.or(`user_id.eq.${userId},visibility.eq.friends,visibility.eq.public`);
     }
 
     const { data: entries, error } = await query;
     if (error) {
-      console.error('Error fetching journal feed:', error);
+      formatSupabaseError('fetchJournalFeed', error);
       return [];
     }
 
@@ -623,7 +724,6 @@ export async function fetchJournalFeed(
 
     const journalIds = entries.map((e) => e.id);
 
-    // Fetch reactions for these journals
     const [reactionsRes, commentsRes] = await Promise.all([
       supabase
         .from('journal_reactions')
@@ -661,7 +761,7 @@ export async function fetchJournalFeed(
       };
     });
   } catch (err) {
-    console.error('Unexpected error fetching journal feed:', err);
+    console.error('[MyLifeService:fetchJournalFeed] Unexpected error:', err);
     return [];
   }
 }
@@ -678,28 +778,58 @@ export async function createJournalEntry(
   }
 ): Promise<{ data: JournalEntry | null; error: Error | null }> {
   try {
+    if (!userId || !payload.content.trim()) {
+      return { data: null, error: new Error('Thiếu thông tin người dùng hoặc nội dung') };
+    }
+
+    await ensureUserProfileExists(userId);
+
     const visibility = payload.visibility || 'friends';
-    const { data, error } = await supabase
+    const insertPayload: any = {
+      user_id: userId,
+      title: payload.title?.trim() || null,
+      content: payload.content.trim(),
+      mood: payload.mood || 3,
+      tags: payload.tags || [],
+      visibility,
+      is_private: visibility === 'private',
+      images: payload.images || [],
+    };
+
+    let { data, error } = await supabase
       .from('journal_entries')
-      .insert({
-        user_id: userId,
-        title: payload.title?.trim() || null,
-        content: payload.content.trim(),
-        mood: payload.mood || 3,
-        tags: payload.tags || [],
-        visibility,
-        is_private: visibility === 'private',
-        images: payload.images || [],
-      })
+      .insert(insertPayload)
       .select(`
         *,
         author:profiles(*)
       `)
       .single();
 
-    if (error) throw error;
+    // Fallback if visibility or tags column is missing on remote DB
+    if (error && error.message?.includes('column')) {
+      console.warn('[MyLifeService:createJournalEntry] Falling back to core columns for journal_entries');
+      const corePayload = {
+        user_id: userId,
+        title: payload.title?.trim() || null,
+        content: payload.content.trim(),
+        mood: payload.mood || 3,
+        is_private: visibility === 'private',
+      };
+      const fallbackRes = await supabase
+        .from('journal_entries')
+        .insert(corePayload)
+        .select(`*, author:profiles(*)`)
+        .single();
+      data = fallbackRes.data;
+      error = fallbackRes.error;
+    }
+
+    if (error) {
+      return { data: null, error: formatSupabaseError('createJournalEntry', error) };
+    }
     return { data: data as JournalEntry, error: null };
   } catch (err) {
+    console.error('[MyLifeService:createJournalEntry] Exception:', err);
     return { data: null, error: err as Error };
   }
 }
@@ -707,9 +837,12 @@ export async function createJournalEntry(
 export async function deleteJournalEntry(journalId: string): Promise<{ success: boolean; error: Error | null }> {
   try {
     const { error } = await supabase.from('journal_entries').delete().eq('id', journalId);
-    if (error) throw error;
+    if (error) {
+      return { success: false, error: formatSupabaseError('deleteJournalEntry', error) };
+    }
     return { success: true, error: null };
   } catch (err) {
+    console.error('[MyLifeService:deleteJournalEntry] Exception:', err);
     return { success: false, error: err as Error };
   }
 }
@@ -720,7 +853,10 @@ export async function toggleJournalReaction(
   reactionType = '❤️'
 ): Promise<{ success: boolean; added: boolean; error: Error | null }> {
   try {
-    // Check if user already reacted with this reaction
+    if (!userId || !journalId) return { success: false, added: false, error: new Error('Thiếu ID') };
+
+    await ensureUserProfileExists(userId);
+
     const { data: existing } = await supabase
       .from('journal_reactions')
       .select('id, reaction_type')
@@ -730,11 +866,9 @@ export async function toggleJournalReaction(
 
     if (existing) {
       if (existing.reaction_type === reactionType) {
-        // Remove reaction
         await supabase.from('journal_reactions').delete().eq('id', existing.id);
         return { success: true, added: false, error: null };
       } else {
-        // Update reaction type
         await supabase
           .from('journal_reactions')
           .update({ reaction_type: reactionType })
@@ -742,15 +876,18 @@ export async function toggleJournalReaction(
         return { success: true, added: true, error: null };
       }
     } else {
-      // Insert new reaction
-      await supabase.from('journal_reactions').insert({
+      const { error } = await supabase.from('journal_reactions').insert({
         journal_id: journalId,
         user_id: userId,
         reaction_type: reactionType,
       });
+      if (error) {
+        return { success: false, added: false, error: formatSupabaseError('toggleJournalReaction', error) };
+      }
       return { success: true, added: true, error: null };
     }
   } catch (err) {
+    console.error('[MyLifeService:toggleJournalReaction] Exception:', err);
     return { success: false, added: false, error: err as Error };
   }
 }
@@ -761,6 +898,12 @@ export async function addJournalComment(
   content: string
 ): Promise<{ data: JournalComment | null; error: Error | null }> {
   try {
+    if (!userId || !journalId || !content.trim()) {
+      return { data: null, error: new Error('Nội dung bình luận không được để trống') };
+    }
+
+    await ensureUserProfileExists(userId);
+
     const { data, error } = await supabase
       .from('journal_comments')
       .insert({
@@ -774,9 +917,12 @@ export async function addJournalComment(
       `)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      return { data: null, error: formatSupabaseError('addJournalComment', error) };
+    }
     return { data: data as JournalComment, error: null };
   } catch (err) {
+    console.error('[MyLifeService:addJournalComment] Exception:', err);
     return { data: null, error: err as Error };
   }
 }
@@ -784,9 +930,12 @@ export async function addJournalComment(
 export async function deleteJournalComment(commentId: string): Promise<{ success: boolean; error: Error | null }> {
   try {
     const { error } = await supabase.from('journal_comments').delete().eq('id', commentId);
-    if (error) throw error;
+    if (error) {
+      return { success: false, error: formatSupabaseError('deleteJournalComment', error) };
+    }
     return { success: true, error: null };
   } catch (err) {
+    console.error('[MyLifeService:deleteJournalComment] Exception:', err);
     return { success: false, error: err as Error };
   }
 }
@@ -797,14 +946,22 @@ export async function shareJournalEntry(
   note?: string
 ): Promise<{ success: boolean; error: Error | null }> {
   try {
+    if (!userId || !journalId) return { success: false, error: new Error('Thiếu ID') };
+
+    await ensureUserProfileExists(userId);
+
     const { error } = await supabase.from('journal_shares').insert({
       journal_id: journalId,
       user_id: userId,
       note: note?.trim() || null,
     });
-    if (error) throw error;
+
+    if (error) {
+      return { success: false, error: formatSupabaseError('shareJournalEntry', error) };
+    }
     return { success: true, error: null };
   } catch (err) {
+    console.error('[MyLifeService:shareJournalEntry] Exception:', err);
     return { success: false, error: err as Error };
   }
 }

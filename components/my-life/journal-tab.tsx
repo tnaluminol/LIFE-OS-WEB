@@ -154,8 +154,9 @@ export function JournalTab({
       setMood(4);
       setSelectedTags([]);
       onJournalsUpdated();
-    } catch {
-      toast.error('Không thể lưu nhật ký. Vui lòng thử lại.');
+    } catch (err: any) {
+      console.error('[JournalTab:createPost] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể lưu nhật ký. Vui lòng thử lại.');
     } finally {
       setSubmitting(false);
     }
@@ -164,20 +165,23 @@ export function JournalTab({
   const handleDeletePost = async (journalId: string) => {
     try {
       const { success, error } = await deleteJournalEntry(journalId);
-      if (error || !success) throw error;
+      if (error || !success) throw error || new Error('Không thể xóa bài viết');
       toast.success('Đã xóa bài viết');
       onJournalsUpdated();
-    } catch {
-      toast.error('Không thể xóa bài viết');
+    } catch (err: any) {
+      console.error('[JournalTab:deletePost] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể xóa bài viết');
     }
   };
 
   const handleReaction = async (journalId: string, emoji: string) => {
     try {
-      await toggleJournalReaction(currentUserId, journalId, emoji);
+      const { error } = await toggleJournalReaction(currentUserId, journalId, emoji);
+      if (error) throw error;
       onJournalsUpdated();
-    } catch {
-      toast.error('Không thể thả biểu cảm');
+    } catch (err: any) {
+      console.error('[JournalTab:reaction] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể thả biểu cảm');
     }
   };
 
@@ -190,8 +194,9 @@ export function JournalTab({
       setCommentText('');
       toast.success('Đã gửi bình luận');
       onJournalsUpdated();
-    } catch {
-      toast.error('Không thể gửi bình luận');
+    } catch (err: any) {
+      console.error('[JournalTab:sendComment] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể gửi bình luận');
     } finally {
       setSubmittingComment(false);
     }
@@ -200,11 +205,12 @@ export function JournalTab({
   const handleDeleteComment = async (commentId: string) => {
     try {
       const { success, error } = await deleteJournalComment(commentId);
-      if (error || !success) throw error;
+      if (error || !success) throw error || new Error('Không thể xóa bình luận');
       toast.success('Đã xóa bình luận');
       onJournalsUpdated();
-    } catch {
-      toast.error('Không thể xóa bình luận');
+    } catch (err: any) {
+      console.error('[JournalTab:deleteComment] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể xóa bình luận');
     }
   };
 
@@ -224,12 +230,13 @@ export function JournalTab({
         sharingJournal.id,
         shareNote
       );
-      if (error || !success) throw error;
+      if (error || !success) throw error || new Error('Không thể chia sẻ bài viết');
       toast.success('Đã chia sẻ bài viết thành công!');
       setShareDialogOpen(false);
       onJournalsUpdated();
-    } catch {
-      toast.error('Không thể chia sẻ bài viết');
+    } catch (err: any) {
+      console.error('[JournalTab:share] Error:', err);
+      toast.error(err?.message ? `Lỗi: ${err.message}` : 'Không thể chia sẻ bài viết');
     } finally {
       setSubmittingShare(false);
     }
