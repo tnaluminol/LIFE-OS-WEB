@@ -81,10 +81,10 @@ export default function AppHomePage() {
 
       {/* Quick stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard icon={BookOpen} label="Flashcards & Quiz" value="Ôn tập thông minh" href="/app/flashcards" color="text-indigo-500" bg="bg-indigo-500/10" />
-        <StatCard icon={Heart} label="My Life" value="Thói quen & Cảm xúc" href="/app/my-life" color="text-rose-500" bg="bg-rose-500/10" />
+        <StatCard icon={BookOpen} label={t('Study')} value={t('0 goals')} href="/app/study" color="text-blue-500" bg="bg-blue-500/10" />
         <StatCard icon={Users} label={t('Communities')} value={`${communities.length} ${t('joined')}`} href="/app/community" color="text-teal-500" bg="bg-teal-500/10" />
         <StatCard icon={Target} label={t('Projects')} value={`${projects.length} ${t('active')}`} href="/app/projects" color="text-green-500" bg="bg-green-500/10" />
+        <StatCard icon={Trophy} label={t('Streak')} value={t('0 days')} href="/app/my-life" color="text-amber-500" bg="bg-amber-500/10" />
       </div>
 
       {/* AI Assistant quick access */}

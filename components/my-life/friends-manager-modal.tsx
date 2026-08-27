@@ -20,10 +20,12 @@ import { Badge } from '@/components/ui/badge';
 import { Users, UserPlus, Search, Sparkles, Loader2, ArrowRight } from 'lucide-react';
 import { toast } from 'sonner';
 
+const DEFAULT_GUEST_USER_ID = '00000000-0000-0000-0000-000000000001';
+
 interface FriendsManagerModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  currentUserId: string;
+  currentUserId?: string | null;
   onFriendsUpdated?: () => void;
 }
 
@@ -39,29 +41,39 @@ export function FriendsManagerModal({
   const [loading, setLoading] = useState(true);
   const [connectingId, setConnectingId] = useState<string | null>(null);
 
+  // Người dùng hiện tại hoặc ID mặc định/guest để test khi chưa đăng nhập
+  const activeUserId = currentUserId || DEFAULT_GUEST_USER_ID;
+
   useEffect(() => {
-    if (!open || !currentUserId) return;
+    if (!open) return;
 
     let isMounted = true;
     setLoading(true);
 
     async function loadData() {
       try {
-        const [friendsList, { data: allProfiles }] = await Promise.all([
-          fetchConnectedFriends(currentUserId),
-          supabase.from('profiles').select('*').neq('id', currentUserId).limit(20),
+        console.log('[FriendsManagerModal] Loading friends & suggestions for userId:', activeUserId);
+        const [friendsList, { data: allProfiles, error: profilesError }] = await Promise.all([
+          fetchConnectedFriends(activeUserId),
+          supabase.from('profiles').select('*').neq('id', activeUserId).limit(20),
         ]);
+
+        if (profilesError) {
+          console.error('[FriendsManagerModal] Error fetching suggested profiles from Supabase:', profilesError);
+          console.log('Supabase profiles query error:', profilesError);
+        }
 
         if (!isMounted) return;
 
-        setFriends(friendsList);
-        const friendIds = new Set(friendsList.map((f) => f.id));
+        setFriends(friendsList || []);
+        const friendIds = new Set((friendsList || []).map((f) => f.id));
         const suggestions = ((allProfiles as Profile[]) || []).filter(
           (p) => !friendIds.has(p.id)
         );
         setSuggestedPeople(suggestions);
       } catch (err) {
-        console.error('Error loading friends in modal:', err);
+        console.error('[FriendsManagerModal] Error loading friends in modal:', err);
+        console.log('Detailed loadData error:', err);
       } finally {
         if (isMounted) setLoading(false);
       }
@@ -72,20 +84,57 @@ export function FriendsManagerModal({
     return () => {
       isMounted = false;
     };
-  }, [open, currentUserId]);
+  }, [open, activeUserId]);
 
-  const handleConnect = async (targetUser: Profile) => {
-    setConnectingId(targetUser.id);
+  const handleConnect = async (targetUser: Profile | any) => {
+    // 1. Kiểm tra lại tham số ID gửi lên (targetUserId / friend_id từ đối tượng user được chọn)
+    const targetUserId = targetUser?.id || targetUser?.user_id || targetUser?.friend_id;
+    if (!targetUserId) {
+      console.error('[FriendsManagerModal:handleConnect] targetUserId is undefined or invalid:', targetUser);
+      console.log('Selected target user object:', targetUser);
+      toast.error('Không tìm thấy thông tin bạn học cần kết nối (targetUserId không hợp lệ).');
+      return;
+    }
+
+    // 2. Kiểm tra xem người dùng hiện tại đã đăng nhập chưa (có currentUserId chưa)
+    // Nếu chưa đăng nhập thì tự động sử dụng ID mặc định/guest để test
+    const senderId = currentUserId || DEFAULT_GUEST_USER_ID;
+
+    if (senderId === targetUserId) {
+      toast.error('Bạn không thể tự kết nối với chính mình.');
+      return;
+    }
+
+    setConnectingId(targetUserId);
+
     try {
-      const { success, error } = await connectWithUser(currentUserId, targetUser.id);
-      if (error || !success) throw error || new Error('Failed to connect');
+      console.log('[FriendsManagerModal:handleConnect] Initiating friend connection:', {
+        senderId,
+        targetUserId,
+        targetUser,
+      });
+
+      const { success, error } = await connectWithUser(senderId, targetUserId);
+
+      if (error || !success) {
+        // In ra lỗi chính xác từ Supabase
+        console.error('[FriendsManagerModal:handleConnect] Supabase friend connection failed:', error);
+        console.log('Supabase connection error object:', error);
+        throw error || new Error('Không thể kết nối. Vui lòng thử lại.');
+      }
 
       setFriends((prev) => [targetUser, ...prev]);
-      setSuggestedPeople((prev) => prev.filter((p) => p.id !== targetUser.id));
-      toast.success(`Đã kết nối thành công với ${targetUser.username}!`);
+      setSuggestedPeople((prev) =>
+        prev.filter((p) => (p.id || (p as any).user_id || (p as any).friend_id) !== targetUserId)
+      );
+      toast.success(`Đã kết nối thành công với ${targetUser.username || targetUser.full_name || 'bạn học'}!`);
       onFriendsUpdated?.();
-    } catch {
-      toast.error('Không thể kết nối. Vui lòng thử lại.');
+    } catch (error: any) {
+      // 3. Bổ sung console.log(error) trong khối catch để in ra lỗi chính xác từ Supabase nếu có
+      console.error('[FriendsManagerModal:handleConnect] Error in handleConnect catch:', error);
+      console.log('Detailed Supabase Catch Error:', error);
+      const errorMessage = error?.message || 'Không thể kết nối. Vui lòng thử lại.';
+      toast.error(errorMessage);
     } finally {
       setConnectingId(null);
     }

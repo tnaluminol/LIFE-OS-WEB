@@ -721,8 +721,31 @@ export async function fetchConnectedFriends(userId: string): Promise<Profile[]> 
       .eq('status', 'accepted');
 
     if (error) {
-      formatSupabaseError('fetchConnectedFriends', error);
-      return [];
+      console.warn('[MyLifeService:fetchConnectedFriends] Foreign key join query failed, falling back to manual join:', error);
+      const { data: simpleData, error: simpleError } = await supabase
+        .from('friendships')
+        .select('id, user_id, friend_id, status')
+        .or(`user_id.eq.${userId},friend_id.eq.${userId}`)
+        .eq('status', 'accepted');
+
+      if (simpleError || !simpleData) {
+        formatSupabaseError('fetchConnectedFriends', simpleError || error);
+        return [];
+      }
+
+      const friendUserIds = simpleData
+        .map((r: any) => (r.user_id === userId ? r.friend_id : r.user_id))
+        .filter(Boolean);
+
+      if (friendUserIds.length === 0) return [];
+
+      const { data: profiles, error: pError } = await supabase
+        .from('profiles')
+        .select('*')
+        .in('id', friendUserIds);
+
+      if (pError || !profiles) return [];
+      return profiles as Profile[];
     }
 
     const friends: Profile[] = [];
@@ -742,32 +765,117 @@ export async function fetchConnectedFriends(userId: string): Promise<Profile[]> 
 }
 
 export async function connectWithUser(
-  currentUserId: string,
-  targetUserId: string
-): Promise<{ success: boolean; error: Error | null }> {
+  currentUserId?: string | null,
+  targetUserId?: string | null | any
+): Promise<{ success: boolean; error: Error | null; data?: any }> {
   try {
-    if (!currentUserId || !targetUserId) {
-      return { success: false, error: new Error('Thiếu thông tin người dùng') };
+    // 1. Kiểm tra và trích xuất targetUserId (hỗ trợ cả string hoặc object chứa id/user_id/friend_id)
+    const effectiveTargetId =
+      typeof targetUserId === 'string'
+        ? targetUserId.trim()
+        : targetUserId?.id || targetUserId?.user_id || targetUserId?.friend_id;
+
+    if (!effectiveTargetId) {
+      const err = new Error('Thiếu ID người dùng mục tiêu cần kết nối (targetUserId is undefined)');
+      console.error('[MyLifeService:connectWithUser] Missing targetUserId:', { currentUserId, targetUserId });
+      return { success: false, error: err };
     }
 
-    await ensureUserProfileExists(currentUserId);
-    await ensureUserProfileExists(targetUserId);
+    // 2. Kiểm tra xem người dùng hiện tại đã đăng nhập chưa (có currentUserId chưa)
+    // Nếu chưa đăng nhập thì tự động lấy session từ Supabase hoặc sử dụng ID mặc định/guest để test
+    let effectiveCurrentId = typeof currentUserId === 'string' ? currentUserId.trim() : (currentUserId as any)?.id;
 
-    const { error } = await supabase.from('friendships').insert({
-      user_id: currentUserId,
-      friend_id: targetUserId,
-      status: 'accepted',
+    if (!effectiveCurrentId) {
+      const { data: sessionData } = await supabase.auth.getSession();
+      effectiveCurrentId = sessionData?.session?.user?.id;
+    }
+
+    if (!effectiveCurrentId) {
+      effectiveCurrentId = '00000000-0000-0000-0000-000000000001';
+      console.warn('[MyLifeService:connectWithUser] Using fallback guest test ID:', effectiveCurrentId);
+    }
+
+    // Không cho phép tự kết nối với chính mình
+    if (effectiveCurrentId === effectiveTargetId) {
+      const selfErr = new Error('Bạn không thể tự kết nối với chính mình');
+      console.warn('[MyLifeService:connectWithUser] Cannot connect to self:', effectiveCurrentId);
+      return { success: false, error: selfErr };
+    }
+
+    console.log('[MyLifeService:connectWithUser] Executing friend connection:', {
+      currentUserId: effectiveCurrentId,
+      targetUserId: effectiveTargetId,
     });
 
-    if (error) {
-      return { success: false, error: formatSupabaseError('connectWithUser', error) };
+    await ensureUserProfileExists(effectiveCurrentId);
+    await ensureUserProfileExists(effectiveTargetId);
+
+    // Kiểm tra xem đã có bản ghi kết bạn từ trước chưa
+    const { data: existing, error: checkError } = await supabase
+      .from('friendships')
+      .select('id, status, user_id, friend_id')
+      .or(`and(user_id.eq.${effectiveCurrentId},friend_id.eq.${effectiveTargetId}),and(user_id.eq.${effectiveTargetId},friend_id.eq.${effectiveCurrentId})`)
+      .maybeSingle();
+
+    if (checkError) {
+      console.warn('[MyLifeService:connectWithUser] Existing check notice:', checkError);
     }
-    return { success: true, error: null };
-  } catch (err) {
+
+    if (existing) {
+      console.log('[MyLifeService:connectWithUser] Friendship already exists in database:', existing);
+      if (existing.status !== 'accepted') {
+        const { error: updateErr } = await supabase
+          .from('friendships')
+          .update({ status: 'accepted', updated_at: new Date().toISOString() })
+          .eq('id', existing.id);
+        if (updateErr) {
+          console.error('[MyLifeService:connectWithUser] Supabase error updating status:', updateErr);
+          return { success: false, error: formatSupabaseError('connectWithUser:update', updateErr) };
+        }
+      }
+      return { success: true, error: null, data: existing };
+    }
+
+    // Thêm bản ghi mới vào bảng friendships
+    const { data: insertData, error: insertError } = await supabase
+      .from('friendships')
+      .insert({
+        user_id: effectiveCurrentId,
+        friend_id: effectiveTargetId,
+        status: 'accepted',
+      })
+      .select()
+      .maybeSingle();
+
+    if (insertError) {
+      // Nếu bị trùng unique constraint, xử lý an toàn như đã kết nối thành công
+      if (
+        insertError.code === '23505' ||
+        insertError.message?.toLowerCase().includes('duplicate') ||
+        insertError.message?.toLowerCase().includes('idx_friendships_pair') ||
+        insertError.message?.toLowerCase().includes('already exists')
+      ) {
+        console.log('[MyLifeService:connectWithUser] Unique pair handled gracefully:', insertError);
+        return { success: true, error: null, data: insertData };
+      }
+
+      console.error('[MyLifeService:connectWithUser] Supabase insert error:', insertError);
+      console.log('[MyLifeService:connectWithUser] Full insertError details:', insertError);
+      return { success: false, error: formatSupabaseError('connectWithUser:insert', insertError) };
+    }
+
+    console.log('[MyLifeService:connectWithUser] Successfully connected:', insertData);
+    return { success: true, error: null, data: insertData };
+  } catch (err: any) {
     console.error('[MyLifeService:connectWithUser] Exception:', err);
-    return { success: false, error: err as Error };
+    console.log('[MyLifeService:connectWithUser] Raw Exception Error:', err);
+    return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
   }
 }
+
+// Aliases for explicit compatibility
+export const sendFriendRequest = connectWithUser;
+export const addFriend = connectWithUser;
 
 // ============================================================
 // 5. Learning Journal Service (Social & Friends Interactions)
